@@ -1,0 +1,9 @@
+Flask: This is the web framework that runs the server for the application.
+
+opencv-python: This library is used for handling the webcam feed, capturing frames, and performing video processing.
+
+mediapipe: This is the core library for face detection. It analyzes the video frames to determine if a face is present.
+
+pygetwindow: This library allows the application to get the title of the currently active window on your computer.
+
+matplotlib: This is used to generate the bar graph showing your focused vs. distracted time.
