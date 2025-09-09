@@ -23,9 +23,14 @@ stop_event = threading.Event()
 # Global variable to store the latest frame
 last_frame = None
 
-# Initialize MediaPipe Face Detection
-mp_face = mp.solutions.face_detection
-face_detection = mp_face.FaceDetection(model_selection=0, min_detection_confidence=0.5)
+# Initialize MediaPipe Face Mesh for eye tracking
+mp_drawing = mp.solutions.drawing_utils
+mp_face_mesh = mp.solutions.face_mesh
+face_mesh = mp_face_mesh.FaceMesh(
+    max_num_faces=1,
+    refine_landmarks=True,
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5)
 
 # HTML for the web interface
 HTML_TEMPLATE = """
@@ -123,7 +128,7 @@ HTML_TEMPLATE = """
                 distractionTimeLabel.textContent = `Distraction Time: ${formatTime(data.distracted_time)}`;
                 
                 if (data.tracking) {
-                    statusMessage.textContent = `Tracking Focus. Face detected: ${data.face_detected ? 'Yes' : 'No'}`;
+                    statusMessage.textContent = `Tracking Focus. Face and eyes visible: ${data.face_detected ? 'Yes' : 'No'}`;
                     statusMessage.style.color = data.face_detected ? 'green' : 'red';
                 } else {
                     statusMessage.textContent = 'Tracking stopped.';
@@ -209,8 +214,21 @@ def webcam_loop():
         if not ret:
             break
 
-        face_detected = is_face_detected(frame)
-        
+        # Convert the frame to RGB for MediaPipe
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = face_mesh.process(rgb_frame)
+        face_detected = bool(results.multi_face_landmarks)
+
+        if face_detected:
+            # Draw the face mesh landmarks on the frame
+            for face_landmarks in results.multi_face_landmarks:
+                mp_drawing.draw_landmarks(
+                    image=frame,
+                    landmark_list=face_landmarks,
+                    connections=mp_face_mesh.FACEMESH_TESSELATION,
+                    landmark_drawing_spec=None,
+                    connection_drawing_spec=mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=1, circle_radius=1))
+
         with lock:
             now = time.time()
             if face_detected:
@@ -226,15 +244,6 @@ def webcam_loop():
 
     cap.release()
     stop_event.set()
-
-def is_face_detected(frame):
-    """
-    Uses MediaPipe to detect a face in the given frame.
-    Returns True if a face is found, False otherwise.
-    """
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = face_detection.process(rgb_frame)
-    return bool(results.detections)
 
 def generate_frames():
     """Video streaming generator function."""
