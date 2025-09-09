@@ -1,15 +1,12 @@
-import os
-import io
 import cv2
 import time
 import threading
-import pygetwindow as gw
+import io
 import matplotlib.pyplot as plt
 import mediapipe as mp
-from flask import Flask, render_template_string, Response, jsonify
-
-# You will need to install the following libraries:
-# pip install Flask opencv-python mediapipe pygetwindow matplotlib
+import webbrowser
+from threading import Timer
+from flask import Flask, render_template_string, Response, jsonify, request
 
 # Flask app initialization
 app = Flask(__name__)
@@ -18,12 +15,13 @@ app = Flask(__name__)
 focused_time = 0
 distracted_time = 0
 timer_running = False
-target_app = ""
 webcam_active = False
 
 # Threading events and locks
 lock = threading.Lock()
 stop_event = threading.Event()
+# Global variable to store the latest frame
+last_frame = None
 
 # Initialize MediaPipe Face Detection
 mp_face = mp.solutions.face_detection
@@ -48,7 +46,7 @@ HTML_TEMPLATE = """
     <div class="bg-white p-8 rounded-2xl shadow-xl w-full max-w-2xl">
         <h1 class="text-3xl font-bold text-center text-gray-800 mb-4">AI Web Focus Tracker</h1>
         <p class="text-gray-600 text-center mb-6">
-            Track your focus on a selected application using your webcam.
+            Track your focus using your webcam.
         </p>
 
         <!-- Video Stream and Info -->
@@ -64,23 +62,17 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
-        <!-- Application Selection and Controls -->
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div class="bg-gray-50 p-4 rounded-xl">
-                <label for="app_listbox" class="block text-gray-700 font-medium mb-2">Select Application:</label>
-                <select id="app_listbox" size="8" class="w-full rounded-lg border border-gray-300 p-2 focus:ring-indigo-500 focus:border-indigo-500"></select>
-            </div>
-            <div class="flex flex-col space-y-4">
-                <button id="start_button" onclick="startTracking()" class="w-full bg-indigo-600 text-white py-3 px-4 rounded-full font-semibold hover:bg-indigo-700 transition-transform transform hover:scale-105 shadow-lg">
-                    Start Tracking
-                </button>
-                <button id="stop_button" onclick="stopTracking()" class="w-full bg-red-600 text-white py-3 px-4 rounded-full font-semibold hover:bg-red-700 transition-transform transform hover:scale-105 shadow-lg">
-                    Stop Tracking
-                </button>
-                <button id="show_graph_button" onclick="showGraph()" class="w-full bg-green-600 text-white py-3 px-4 rounded-full font-semibold hover:bg-green-700 transition-transform transform hover:scale-105 shadow-lg">
-                    Show Focus Graph
-                </button>
-            </div>
+        <!-- Controls -->
+        <div class="flex flex-col md:flex-row justify-center gap-4">
+            <button id="start_button" onclick="startTracking()" class="w-full bg-indigo-600 text-white py-3 px-4 rounded-full font-semibold hover:bg-indigo-700 transition-transform transform hover:scale-105 shadow-lg">
+                Start Tracking
+            </button>
+            <button id="stop_button" onclick="stopTracking()" class="w-full bg-red-600 text-white py-3 px-4 rounded-full font-semibold hover:bg-red-700 transition-transform transform hover:scale-105 shadow-lg">
+                Stop Tracking
+            </button>
+            <button id="show_graph_button" onclick="showGraph()" class="w-full bg-green-600 text-white py-3 px-4 rounded-full font-semibold hover:bg-green-700 transition-transform transform hover:scale-105 shadow-lg">
+                Show Focus Graph
+            </button>
         </div>
 
         <!-- Time Display -->
@@ -104,7 +96,6 @@ HTML_TEMPLATE = """
     </div>
 
     <script>
-        const appListbox = document.getElementById('app_listbox');
         const startButton = document.getElementById('start_button');
         const stopButton = document.getElementById('stop_button');
         const focusTimeLabel = document.getElementById('focus_time_label');
@@ -116,22 +107,6 @@ HTML_TEMPLATE = """
         const graphImage = document.getElementById('graph_image');
 
         stopButton.disabled = true;
-
-        async function getOpenWindows() {
-            try {
-                const response = await fetch('/get_windows');
-                const data = await response.json();
-                appListbox.innerHTML = '';
-                data.windows.forEach(window => {
-                    const option = document.createElement('option');
-                    option.textContent = window;
-                    option.value = window;
-                    appListbox.appendChild(option);
-                });
-            } catch (error) {
-                console.error("Failed to fetch open windows:", error);
-            }
-        }
 
         async function updateStats() {
             try {
@@ -148,11 +123,11 @@ HTML_TEMPLATE = """
                 distractionTimeLabel.textContent = `Distraction Time: ${formatTime(data.distracted_time)}`;
                 
                 if (data.tracking) {
-                    statusMessage.textContent = `Tracking Focus on: ${data.target_app}`;
-                    statusMessage.style.color = 'green';
-                } else if (data.target_app) {
-                    statusMessage.textContent = 'Not Focused';
-                    statusMessage.style.color = 'red';
+                    statusMessage.textContent = `Tracking Focus. Face detected: ${data.face_detected ? 'Yes' : 'No'}`;
+                    statusMessage.style.color = data.face_detected ? 'green' : 'red';
+                } else {
+                    statusMessage.textContent = 'Tracking stopped.';
+                    statusMessage.style.color = 'blue';
                 }
             } catch (error) {
                 console.error("Failed to fetch stats:", error);
@@ -161,24 +136,14 @@ HTML_TEMPLATE = """
         }
 
         async function startTracking() {
-            const selectedApp = appListbox.value;
-            if (!selectedApp) {
-                statusMessage.textContent = "Please select an application first!";
-                statusMessage.style.color = 'red';
-                return;
-            }
-
             try {
-                const response = await fetch('/start_tracking', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ app_name: selectedApp })
-                });
+                const response = await fetch('/start_tracking', { method: 'POST' });
                 const data = await response.json();
                 if (data.success) {
                     startButton.disabled = true;
                     stopButton.disabled = false;
-                    appListbox.disabled = true;
+                    statusMessage.textContent = 'Starting tracking...';
+                    statusMessage.style.color = 'blue';
                 } else {
                     statusMessage.textContent = "Failed to start tracking.";
                     statusMessage.style.color = 'red';
@@ -195,7 +160,6 @@ HTML_TEMPLATE = """
                 if (data.success) {
                     startButton.disabled = false;
                     stopButton.disabled = true;
-                    appListbox.disabled = false;
                     statusMessage.textContent = "Tracking stopped.";
                     statusMessage.style.color = 'blue';
                 }
@@ -218,7 +182,6 @@ HTML_TEMPLATE = """
         };
 
         window.onload = () => {
-            getOpenWindows();
             updateStats();
         };
 
@@ -227,34 +190,12 @@ HTML_TEMPLATE = """
 </html>
 """
 
-def get_active_window_title():
-    """
-    Gets the title of the currently active window.
-    """
-    try:
-        active_window = gw.getActiveWindow()
-        if active_window:
-            return active_window.title
-        else:
-            return ""
-    except gw.PyGetWindowException:
-        return ""
-
-def is_face_detected(frame):
-    """
-    Uses MediaPipe to detect a face in the given frame.
-    Returns True if a face is found, False otherwise.
-    """
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = face_detection.process(rgb_frame)
-    return bool(results.detections)
-
 def webcam_loop():
     """
     Main loop to capture video, detect face, and track focus time.
     Runs in a separate thread.
     """
-    global focused_time, distracted_time, timer_running
+    global focused_time, distracted_time, timer_running, last_frame
     cap = cv2.VideoCapture(0)
     last_check = time.time()
     
@@ -269,78 +210,84 @@ def webcam_loop():
             break
 
         face_detected = is_face_detected(frame)
-        current_active_window = get_active_window_title()
-
+        
         with lock:
             now = time.time()
-            if target_app and face_detected and (current_active_window == target_app):
+            if face_detected:
                 timer_running = True
                 focused_time += now - last_check
             else:
                 timer_running = False
                 distracted_time += now - last_check
             last_check = now
+            # Store the frame for the video feed generator
+            ret, buffer = cv2.imencode('.jpg', frame)
+            last_frame = buffer.tobytes()
 
-        # Encode frame for video feed
-        ret, buffer = cv2.imencode('.jpg', frame)
-        frame = buffer.tobytes()
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-    
     cap.release()
     stop_event.set()
+
+def is_face_detected(frame):
+    """
+    Uses MediaPipe to detect a face in the given frame.
+    Returns True if a face is found, False otherwise.
+    """
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = face_detection.process(rgb_frame)
+    return bool(results.detections)
+
+def generate_frames():
+    """Video streaming generator function."""
+    global last_frame
+    while True:
+        with lock:
+            if last_frame is not None:
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + last_frame + b'\r\n')
+        time.sleep(0.1) # Add a small delay to avoid consuming too much CPU
 
 @app.route('/')
 def index():
     """Renders the main web interface."""
     return render_template_string(HTML_TEMPLATE)
 
-@app.route('/get_windows')
-def get_windows():
-    """Returns a JSON list of open application window titles."""
-    try:
-        open_windows = [title for title in gw.getAllTitles() if title.strip()]
-        return jsonify(windows=open_windows)
-    except Exception as e:
-        print(f"Error getting windows: {e}")
-        return jsonify(windows=[]), 500
-
 @app.route('/start_tracking', methods=['POST'])
 def start_tracking():
     """Starts the focus tracking process."""
-    global target_app
-    data = request.json
-    target_app = data.get('app_name')
-    if target_app:
-        return jsonify(success=True)
-    return jsonify(success=False), 400
+    global webcam_active, focused_time, distracted_time
+    if not webcam_active:
+        stop_event.clear()
+        focused_time = 0
+        distracted_time = 0
+        threading.Thread(target=webcam_loop, daemon=True).start()
+        webcam_active = True
+    return jsonify(success=True)
 
 @app.route('/stop_tracking', methods=['POST'])
 def stop_tracking():
     """Stops the focus tracking process."""
-    global target_app
-    target_app = ""
+    global webcam_active
+    if webcam_active:
+        stop_event.set()
+        webcam_active = False
     return jsonify(success=True)
 
 @app.route('/get_stats')
 def get_stats():
     """Returns the current focused and distracted times."""
     with lock:
+        face_detected = timer_running
         return jsonify(
             focused_time=focused_time,
             distracted_time=distracted_time,
-            tracking=timer_running,
-            target_app=target_app
+            tracking=webcam_active,
+            face_detected=face_detected
         )
 
 @app.route('/video_feed')
 def video_feed():
     """Video streaming route. Feeds the webcam frames."""
-    global webcam_active
-    if not webcam_active:
-        threading.Thread(target=webcam_loop, daemon=True).start()
-        webcam_active = True
-    return Response(webcam_loop(), mimetype='multipart/x-mixed-replace; boundary=frame')
+    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 @app.route('/plot_graph')
 def plot_graph():
